@@ -1,0 +1,27 @@
+{
+  "name": "connect",
+  "productName": "CONNECT",
+  "version": "0.1.0",
+  "description": "CONNECT : présenter son écran ou prendre le contrôle d’un autre poste de l’agence, par Internet",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "fr.remithollet.connect",
+    "productName": "CONNECT",
+    "files": ["main.js", "preload.js", "renderer/**", "package.json"],
+    "asarUnpack": ["node_modules/@nut-tree-fork/**", "node_modules/@nut-tree/**"],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg" }
+  }
+}

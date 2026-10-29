@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src ws: wss:; media-src 'self' blob: mediastream:; img-src 'self' data:; style-src 'self'; script-src 'self'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CONNECT</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<main id="home" class="home">
+  <section class="col">
+    <header class="top">
+      <h1>CONNECT</h1>
+      <span class="pill" id="netPill" data-s="connecting">Connexion au serveur…</span>
+    </header>
+
+    <div class="box">
+      <div class="lbl">Votre identifiant (prénom du poste)</div>
+      <div class="bigid" id="myId">—</div>
+      <div class="lbl">Code temporaire (usage unique)</div>
+      <div class="row">
+        <span class="code mono" id="myCode">------</span>
+        <button class="ghost" id="copyCode" type="button">Copier</button>
+        <button class="ghost" id="newCode" type="button">Nouveau code</button>
+      </div>
+      <p class="hint">Pour qu’on se connecte à ce poste, transmettez le code à la personne : elle saisit votre prénom et ce code. Le code est généré automatiquement à chaque lancement de CONNECT, et détruit dès qu’il a servi.</p>
+    </div>
+
+    <details class="box" id="settings">
+      <summary>Réglages</summary>
+      <label for="setPrenom">Prénom de ce poste</label>
+      <input id="setPrenom" autocomplete="off" maxlength="30">
+      <label for="setServer">Adresse du serveur</label>
+      <input id="setServer" class="mono" autocomplete="off" placeholder="wss://acces.exemple.fr">
+      <label for="setKey">Clé de l’agence</label>
+      <input id="setKey" type="password" class="mono" autocomplete="off">
+      <button class="ghost" id="saveSettings" type="button">Enregistrer et reconnecter</button>
+      <p class="hint" id="injectInfo"></p>
+    </details>
+  </section>
+
+  <section class="col">
+    <form id="connectForm" class="connect" novalidate>
+      <h2>Se connecter à un poste</h2>
+      <div class="fields">
+        <div><label for="target">Poste (prénom)</label><input id="target" list="onlineNames" autocomplete="off" maxlength="30" placeholder="Prénom du poste">
+          <datalist id="onlineNames"></datalist></div>
+        <div><label for="peerCode">Code</label><input id="peerCode" class="mono" autocomplete="off" maxlength="6" placeholder="6 signes"></div>
+      </div>
+      <fieldset class="modes">
+        <legend>Que voulez-vous faire ?</legend>
+        <label class="mode"><input type="radio" name="mode" value="present" checked><span class="card"><b>Présenter</b><span>Vous partagez votre écran. L’autre poste regarde.</span></span></label>
+        <label class="mode ctl"><input type="radio" name="mode" value="control"><span class="card"><b>Prendre le contrôle</b><span>Vous voyez l’écran de l’autre poste et vous le pilotez.</span></span></label>
+      </fieldset>
+      <p class="err" id="err" role="alert"></p>
+      <button class="primary" id="goBtn" type="submit">Présenter mon écran</button>
+    </form>
+
+    <div>
+      <h2>Postes en ligne</h2>
+      <p class="hint" style="margin-bottom:6px">Cliquez sur un poste pour remplir son prénom, puis saisissez le code qu’il vous communique.</p>
+      <div id="peerList" class="peerlist"><span class="hint">Aucun autre poste en ligne.</span></div>
+    </div>
+  </section>
+</main>
+
+<main id="session" class="session" hidden>
+  <div class="bar">
+    <span class="dot"></span><b id="peerName">—</b>
+    <span class="chip" id="roleChip"></span>
+    <span class="mono info" id="netInfo">connexion…</span>
+    <span class="mono info" id="timer">00:00</span>
+    <div class="tools">
+      <button class="tool" id="btnCtl" type="button" aria-pressed="false" hidden></button>
+      <button class="tool" id="btnFull" type="button" hidden>Plein écran</button>
+      <button class="tool end" id="btnEnd" type="button">Terminer</button>
+    </div>
+  </div>
+  <div class="banner" id="banner" aria-live="polite"></div>
+  <div class="reqbar" id="reqbar" hidden>
+    <span id="reqText"></span>
+    <button class="tool" id="reqYes" type="button">Autoriser</button>
+    <button class="tool" id="reqNo" type="button">Refuser</button>
+  </div>
+
+  <div class="viewer" id="viewer" tabindex="0" hidden>
+    <video id="video" autoplay playsinline muted></video>
+    <div class="wait" id="wait">En attente de l’image de l’autre poste…</div>
+  </div>
+
+  <div class="sharer" id="sharer" hidden>
+    <div class="sharebox">
+      <div class="bigdot"></div>
+      <h2 id="shareTitle">Votre écran est partagé</h2>
+      <p id="shareText"></p>
+      <p class="hint">Arrêt d’urgence du contrôle : <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>X</kbd> (<kbd>⌘</kbd> + <kbd>Alt</kbd> + <kbd>X</kbd> sur Mac), à tout moment.</p>
+    </div>
+  </div>
+</main>
+
+<div class="scrim" id="setup" hidden>
+  <form class="dlg" id="setupForm" novalidate>
+    <h3 id="setupTitle">Prénom de ce poste</h3>
+    <p id="setupText">Ce prénom identifie ce poste auprès des collègues, qui le saisissent pour s’y connecter.</p>
+    <input id="setupName" autocomplete="off" maxlength="30" placeholder="Votre prénom" aria-label="Votre prénom">
+    <div id="setupKeyRow" hidden>
+      <label for="setupKey">Clé de l’agence (fournie par l’administrateur)</label>
+      <input id="setupKey" type="password" autocomplete="off" class="mono">
+    </div>
+    <p class="err" id="setupErr" role="alert"></p>
+    <div class="drow"><button class="primary" type="submit">Enregistrer</button></div>
+  </form>
+</div>
+
+<div class="scrim" id="calling" hidden>
+  <div class="dlg"><h3>Appel en cours</h3><p id="callText">En attente de l’acceptation…</p><div class="drow"><button class="ghost" id="callCancel" type="button">Annuler</button></div></div>
+</div>
+
+<div class="scrim" id="incoming" hidden>
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="inTitle">
+    <h3 id="inTitle">Demande de connexion</h3>
+    <p id="inText"></p>
+    <label class="chk" id="inCtlRow"><input type="checkbox" id="inCtl"> Autoriser l’utilisation de ma souris et de mon clavier</label>
+    <div class="drow"><button class="ghost" id="inNo" type="button">Refuser</button><button class="primary" id="inYes" type="button">Accepter</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
