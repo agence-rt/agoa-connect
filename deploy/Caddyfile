@@ -1,0 +1,4 @@
+# Caddy obtient et renouvelle seul le certificat TLS de DOMAIN, et relaie aussi les WebSocket.
+{$DOMAIN} {
+	reverse_proxy connect:8080
+}

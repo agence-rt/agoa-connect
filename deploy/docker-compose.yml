@@ -1,0 +1,63 @@
+# CONNECT : serveur de signalisation + TLS automatique (Caddy) + relais TURN (coturn).
+# Usage : voir deploy/README.md.  Les valeurs viennent du fichier .env (modèle : .env.example).
+services:
+  connect:
+    build: ../server
+    restart: unless-stopped
+    environment:
+      TRUST_PROXY: "1"
+      AGENCY_KEY: ${AGENCY_KEY:?Définir AGENCY_KEY dans .env}
+      ICE_SERVERS: '[{"urls":["stun:${DOMAIN}:3478"]},{"urls":["turn:${DOMAIN}:3478?transport=udp","turn:${DOMAIN}:3478?transport=tcp"],"username":"${TURN_USER}","credential":"${TURN_PASSWORD:?Définir TURN_PASSWORD dans .env}"}]'
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - connect
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Définir DOMAIN dans .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Relais TURN : indispensable quand une connexion directe est impossible (réseaux d'entreprise, 4G).
+  # Mode réseau « host » : TURN a besoin de sa plage de ports UDP, sans traduction d'adresse par Docker.
+  coturn:
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - "-n"
+      - "--log-file=stdout"
+      - "--no-cli"
+      - "--fingerprint"
+      - "--lt-cred-mech"
+      - "--realm=${DOMAIN}"
+      - "--user=${TURN_USER}:${TURN_PASSWORD}"
+      - "--listening-port=3478"
+      - "--min-port=49160"
+      - "--max-port=49200"
+      - "--external-ip=${PUBLIC_IP:?Définir PUBLIC_IP dans .env}"
+      - "--no-multicast-peers"
+      # Le relais ne doit jamais servir à atteindre le réseau interne du serveur.
+      - "--denied-peer-ip=0.0.0.0-0.255.255.255"
+      - "--denied-peer-ip=10.0.0.0-10.255.255.255"
+      - "--denied-peer-ip=127.0.0.0-127.255.255.255"
+      - "--denied-peer-ip=169.254.0.0-169.254.255.255"
+      - "--denied-peer-ip=172.16.0.0-172.31.255.255"
+      - "--denied-peer-ip=192.168.0.0-192.168.255.255"
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -23,9 +23,11 @@ Présenter son écran ou prendre le contrôle d'un autre poste de l'agence, **pa
 
 ```
 server/            serveur de signalisation (Node.js, un fichier) + Dockerfile + tests
+deploy/            Docker Compose (serveur + Caddy + coturn), .env.example et guide de déploiement
 client/            application de bureau (Electron)
   main.js          capture d'écran, injection souris/clavier, arrêt d'urgence
   preload.js       pont sécurisé vers l'interface
+  build/           icônes (icon.ico, icon.png) et make-icons.py pour les régénérer
   renderer/        interface et logique WebRTC
   test/e2e.py      test de bout en bout (Chromium)
 .github/workflows/ci.yml        tests à chaque envoi
@@ -35,6 +37,8 @@ client/            application de bureau (Electron)
 ## Mise en route
 
 ### 1. Le serveur (une fois, sur une machine accessible depuis Internet)
+
+**Déploiement complet (serveur, HTTPS automatique et relais TURN) : voir [`deploy/README.md`](deploy/README.md).** Ce qui suit en est le principe.
 
 Adresse en `wss://` obligatoire (TLS). Exemple avec Docker et Caddy :
 
@@ -108,7 +112,7 @@ La barre de session affiche « direct » ou « relais » à côté du temps de r
 * Windows : une fenêtre lancée en administrateur (ou l'invite UAC) ne se laisse pas piloter par une application normale.
 * Mac : autoriser l'application dans Réglages Système > Confidentialité (*Enregistrement de l'écran* et *Accessibilité*).
 * L'installateur n'est pas signé : SmartScreen affichera un avertissement.
-* Pas encore d'icône : celle d'Electron s'affiche (voir `client/package.json`, clé `build.win.icon`).
+* Icône : carré rouge avec « CO ». Le rouge est **provisoire** ; pour le remplacer par le rouge exact de l'agence : `pip install pillow && python3 client/build/make-icons.py "#RRGGBB"`, puis committer les trois fichiers générés.
 
 ## Tests
 

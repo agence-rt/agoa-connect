@@ -126,6 +126,7 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1100, height: 760, minWidth: 760, minHeight: 560,
     title: 'CONNECT',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   win.setMenuBarVisibility(false);

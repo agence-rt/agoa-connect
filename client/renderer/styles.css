@@ -22,7 +22,8 @@ button { cursor:pointer; }
 .col { padding:26px; display:flex; flex-direction:column; gap:20px; min-width:0; overflow:auto; }
 .col + .col { border-left:1px solid var(--line); }
 .top { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
-h1 { margin:0; font-size:20px; }
+h1 { margin:0; font-size:20px; display:flex; align-items:center; gap:10px; }
+.logo { display:block; }
 h2 { margin:0 0 4px; font-size:13px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-2); }
 .pill { font-size:12px; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line); }
 .pill[data-s="online"] { color:var(--ok); border-color:var(--ok); }
