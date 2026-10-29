@@ -1,6 +1,6 @@
 # CONNECT
 
-Présenter son écran ou prendre le contrôle d'un autre poste de l'agence, **par Internet**, entre ordinateurs où CONNECT est installé.
+Présenter son écran ou prendre le contrôle d'un autre poste de l'agence, entre ordinateurs où CONNECT est installé : **sur le réseau privé (VPN) de l'agence**, où les postes se voient directement, ou **par Internet** via un serveur de signalisation.
 
 ## Principe
 
@@ -19,17 +19,33 @@ Présenter son écran ou prendre le contrôle d'un autre poste de l'agence, **pa
 * **Deux modes :** *Présenter* (je partage mon écran) et *Prendre le contrôle* (je pilote l'écran de l'autre). Le poste partagé accorde ou retire le contrôle à tout moment ; le poste qui regarde peut le demander.
 * **Pas d'identité individuelle :** le launcher est connecté avec un compte Google commun, donc rien ne distingue les personnes. La sécurité repose sur trois choses : la **clé de l'agence** (secret commun, vérifié par le serveur), le **code à usage unique** transmis de vive voix, et l'**acceptation sur place** de chaque connexion.
 
+## Réseau privé (VPN) : voir directement les postes
+
+Sur un réseau privé virtuel, les postes ont une adresse privée fixe et se joignent **sans serveur Internet**. CONNECT :
+
+1. **écoute uniquement sur les adresses du VPN** de ce poste (plus la boucle locale), jamais sur le Wi-Fi ou le réseau public ;
+2. **repère les autres postes CONNECT du VPN** et affiche leur prénom, leur disponibilité et la mention « réseau privé » dans *Postes en ligne*. Découverte par : la liste des appareils en ligne de **Tailscale** (commande `tailscale`, si installée), le **balayage des plages** configurées (jusqu'à 1 024 adresses, par exemple `10.8.0.0/24` pour WireGuard ou OpenVPN), et les **adresses ajoutées à la main** dans Réglages ;
+3. **appelle directement** le poste choisi : prénom + code à usage unique + acceptation sur place, comme sur Internet. Le poste appelé garde la main : sa clé d'agence, son code et son accord restent exigés. Si le poste annoncé ne répond pas et qu'un serveur Internet est configuré, CONNECT bascule dessus.
+
+Chaque poste n'annonce que son prénom et sa disponibilité (requête `GET /who` sur le port **47800**), uniquement aux machines du VPN.
+
+**Mise en place avec Tailscale** (le plus simple) : créer un compte Tailscale pour l'agence, installer Tailscale sur chaque poste et y ouvrir la même session, puis lancer CONNECT. Rien d'autre à régler : la plage par défaut est celle de Tailscale (`100.64.0.0/10`). Pour un VPN WireGuard ou OpenVPN, saisir sa plage dans **Réglages > Plages du réseau privé** (ex. `10.8.0.0/24`). Si le pare-feu Windows demande d'autoriser CONNECT, accepter pour les réseaux privés.
+
+Le **serveur Internet est facultatif** : laissé vide dans Réglages, CONNECT fonctionne uniquement sur le réseau privé. Le réglage peut être désactivé (case *Réseau privé*).
+
 ## Contenu du dépôt
 
 ```
-server/            serveur de signalisation (Node.js, un fichier) + Dockerfile + tests
+server/            serveur de signalisation (server.js) et cœur du protocole (hub.js, partagé avec les postes) + Dockerfile + tests
 deploy/            Docker Compose (serveur + Caddy + coturn), .env.example et guide de déploiement
 client/            application de bureau (Electron)
   main.js          capture d'écran, injection souris/clavier, arrêt d'urgence
+  direct.js        mode réseau privé : écoute sur le VPN et découverte des postes
+  hub.js           copie de server/hub.js (générée par « npm run sync-hub », non versionnée)
   preload.js       pont sécurisé vers l'interface
   build/           icônes (icon.ico, icon.png) et make-icons.py pour les régénérer
   renderer/        interface et logique WebRTC
-  test/e2e.py      test de bout en bout (Chromium)
+  test/            direct.test.js (réseau privé) et e2e.py (bout en bout, Chromium)
 .github/workflows/ci.yml        tests à chaque envoi
 .github/workflows/release.yml   installateur Windows publié à chaque étiquette de version
 ```
@@ -105,6 +121,7 @@ La barre de session affiche « direct » ou « relais » à côté du temps de r
 
 ## Limites connues
 
+* Réseau privé : la découverte par Tailscale suppose la commande `tailscale` installée ; sans elle, CONNECT balaie les plages configurées (VPN à petite plage) ou les adresses ajoutées à la main. Non testé sur un vrai VPN.
 * Pas de postes de confiance (accès sans surveillance) : chaque connexion demande le code et l'acceptation.
 * Le prénom n'est pas une preuve d'identité : toute personne qui connaît la clé de l'agence peut prendre n'importe quel prénom libre.
 * Pas de réduction dans la zone de notification ni de démarrage avec Windows : CONNECT doit être ouvert.
@@ -118,7 +135,8 @@ La barre de session affiche « direct » ou « relais » à côté du temps de r
 
 ```bash
 cd server && npm ci && npm test        # protocole du serveur (18 contrôles)
-python3 client/test/e2e.py             # fenêtres Chromium, vraie connexion WebRTC (34 contrôles)
+cp server/hub.js client/hub.js && NODE_PATH=server/node_modules node client/test/direct.test.js   # réseau privé (14 contrôles)
+python3 client/test/e2e.py             # fenêtres Chromium, vraie connexion WebRTC, Internet et réseau privé (45 contrôles)
 ```
 
 Le test de bout en bout remplace la couche Electron (capture, injection) par des simulations. Il valide donc l'identification, la vidéo, le canal de commandes et les autorisations, mais **pas** `client/main.js` ni l'injection réelle par `nut-js` : ces deux points se vérifient sur un vrai poste. Les workflows GitHub n'ont pas encore tourné.

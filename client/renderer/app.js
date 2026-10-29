@@ -12,8 +12,13 @@ const REASONS = {
   gone: 'L’autre poste s’est déconnecté.',
 };
 
-let cfg = null, ws = null, retry = 0, retryT = null;
-let ice = [{ urls: 'stun:stun.l.google.com:19302' }];
+// Trois sortes de liaisons de signalisation :
+//   net : serveur Internet ; hub : hub de ce poste, ouvert aux autres postes du réseau privé (VPN) ;
+//   out : liaison temporaire vers le hub d'un autre poste, le temps d'un appel direct.
+let cfg = null, retry = 0, retryT = null, hubRetry = 0, hubRetryT = null;
+const net = { kind: 'net', ws: null, ice: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const hub = { kind: 'hub', ws: null, ice: [] };
+let netPeers = [], directPeers = [], directStatus = null, hubGen = 0;
 let myCode = '', outgoing = null, incoming = null, sess = null, toastT = null, noRetry = false;
 
 /* ---------- Utilitaires ---------- */
@@ -32,7 +37,8 @@ function genCode() {
   return Array.from(r, (x) => a[x % a.length]).join('');
 }
 function show(view) { $('#home').hidden = view !== 'home'; $('#session').hidden = view !== 'session'; }
-function wsSend(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function chSend(ch, o) { if (ch && ch.ws && ch.ws.readyState === 1) ch.ws.send(JSON.stringify(o)); }
+const wsSend = (o) => chSend(net, o);
 function setNet(s, text) { const p = $('#netPill'); p.dataset.s = s; p.textContent = text; }
 function renderSelf() { $('#myId').textContent = cfg.prenom || '—'; $('#myCode').textContent = myCode; }
 
@@ -52,18 +58,26 @@ $('#setupForm').addEventListener('submit', async (e) => {
   if (!$('#setupKeyRow').hidden && !k) { $('#setupErr').textContent = 'Saisissez la clé de l’agence.'; return; }
   cfg = await api.setConfig(k ? { prenom: v, key: k } : { prenom: v });
   $('#setup').hidden = true; $('#setPrenom').value = cfg.prenom; $('#setKey').value = cfg.key;
-  renderSelf(); connectWs();
+  renderSelf(); connectWs(); connectHub();
 });
 
 /* ---------- Postes en ligne ---------- */
-function renderPeers(list) {
-  const me = norm(cfg.prenom);
-  const others = (list || []).filter((p) => norm(p.name) !== me);
+// Postes visibles : ceux du réseau privé (liaison directe) et ceux du serveur Internet. Un poste présent
+// des deux côtés est joint par le réseau privé.
+function allPeers() {
+  const me = norm(cfg.prenom), map = new Map();
+  netPeers.forEach((p) => { if (norm(p.name) !== me) map.set(norm(p.name), { name: p.name, busy: !!p.busy, via: 'net' }); });
+  directPeers.forEach((p) => { if (norm(p.name) !== me) map.set(norm(p.name), { name: p.name, busy: !!p.busy, via: 'direct', host: p.host, port: p.port }); });
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+}
+function renderPeers() {
+  const others = allPeers();
   $('#onlineNames').innerHTML = others.map((p) => '<option value="' + esc(p.name) + '"></option>').join('');
+  renderNetInfo();
   const box = $('#peerList');
   if (!others.length) { box.innerHTML = '<span class="hint">Aucun autre poste en ligne.</span>'; return; }
   box.innerHTML = others.map((p) =>
-    '<div class="peer"><span class="dot ' + (p.busy ? 'busy' : 'on') + '"></span><span class="nm">' + esc(p.name) + '</span><span class="st">' + (p.busy ? 'occupé' : 'disponible') + '</span>' +
+    '<div class="peer"><span class="dot ' + (p.busy ? 'busy' : 'on') + '"></span><span class="nm">' + esc(p.name) + '</span><span class="via">' + (p.via === 'direct' ? 'réseau privé' : 'Internet') + '</span><span class="st">' + (p.busy ? 'occupé' : 'disponible') + '</span>' +
     '<button type="button" class="ghost" data-n="' + esc(p.name) + '" data-m="present"' + (p.busy ? ' disabled' : '') + '>Présenter</button>' +
     '<button type="button" class="ghost" data-n="' + esc(p.name) + '" data-m="control"' + (p.busy ? ' disabled' : '') + '>Contrôler</button></div>').join('');
 }
@@ -75,18 +89,54 @@ $('#peerList').addEventListener('click', (e) => {
   $('#peerCode').focus();
 });
 
+/* ---------- Réseau privé (VPN) ---------- */
+function renderNetInfo() {
+  const st = directStatus, pill = $('#vpnPill'), info = $('#vpnInfo');
+  if (!st) { pill.dataset.s = 'connecting'; pill.textContent = 'Réseau privé…'; info.textContent = ''; return; }
+  if (!st.enabled) { pill.dataset.s = 'idle'; pill.textContent = 'Réseau privé désactivé'; info.textContent = 'Le mode réseau privé est désactivé dans les réglages.'; return; }
+  if (st.error) { pill.dataset.s = 'offline'; pill.textContent = 'Réseau privé : erreur'; info.textContent = st.error; return; }
+  if (!st.listening.length) {
+    pill.dataset.s = 'offline'; pill.textContent = 'Réseau privé : VPN non détecté';
+    info.textContent = 'Aucun VPN détecté sur ce poste. Lancez Tailscale (ou votre VPN) pour voir directement les postes connectés.';
+    return;
+  }
+  pill.dataset.s = 'online'; pill.textContent = 'Réseau privé : ' + directPeers.length + ' poste' + (directPeers.length > 1 ? 's' : '');
+  info.textContent = 'À l’écoute sur ' + st.listening.join(', ') + ' (port ' + st.port + ').';
+}
+api.onDirectPeers((l) => { directPeers = Array.isArray(l) ? l : []; renderPeers(); });
+api.onDirectStatus((st) => { const was = directStatus; directStatus = st; renderPeers(); if (!was || was.port !== st.port || was.enabled !== st.enabled) connectHub(); });
+$('#refreshPeers').addEventListener('click', () => { api.directRefresh(); toast('Recherche des postes…'); });
+
+// Hub de ce poste : les autres postes du réseau privé s'y connectent pour m'appeler.
+async function connectHub() {
+  const gen = ++hubGen;
+  clearTimeout(hubRetryT);
+  if (hub.ws) { try { hub.ws.onclose = null; hub.ws.close(); } catch { /* ignoré */ } hub.ws = null; }
+  if (!cfg || !cfg.prenom || !directStatus || !directStatus.enabled) return;
+  const info = await api.directInfo(); if (!info || gen !== hubGen) return;
+  let sock;
+  try { sock = hub.ws = new WebSocket(info.url); } catch { return; }
+  sock.onopen = () => { hubRetry = 0; chSend(hub, { t: 'hello', name: cfg.prenom, code: myCode, key: cfg.key, inst: cfg.inst }); };
+  sock.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } onMsg(m, hub); };
+  sock.onclose = () => { if (sock !== hub.ws) return; hubRetryT = setTimeout(connectHub, Math.min(10000, 1000 * 2 ** hubRetry++)); };
+  sock.onerror = () => {};
+}
+const sendCode = () => { chSend(net, { t: 'code', code: myCode }); chSend(hub, { t: 'code', code: myCode }); };
+
 /* ---------- Connexion au serveur de signalisation ---------- */
 function connectWs() {
   clearTimeout(retryT); noRetry = false;
-  if (ws) { try { ws.onclose = null; ws.close(); } catch { /* ignoré */ } }
+  if (net.ws) { try { net.ws.onclose = null; net.ws.close(); } catch { /* ignoré */ } net.ws = null; }
+  netPeers = []; renderPeers();
   if (!cfg.prenom) { setNet('offline', 'Prénom à choisir'); showSetup(); return; }
+  if (!cfg.server) { setNet('idle', 'Serveur Internet : non configuré'); return; }
   setNet('connecting', 'Connexion au serveur…');
   let sock;
-  try { sock = ws = new WebSocket(cfg.server); } catch { setNet('offline', 'Adresse du serveur invalide'); return; }
+  try { sock = net.ws = new WebSocket(cfg.server); } catch { setNet('offline', 'Adresse du serveur invalide'); return; }
   sock.onopen = () => { retry = 0; wsSend({ t: 'hello', name: cfg.prenom, code: myCode, key: cfg.key, inst: cfg.inst }); };
-  sock.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } onMsg(m); };
+  sock.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } onMsg(m, net); };
   sock.onclose = () => {
-    if (sock !== ws) return;
+    if (sock !== net.ws) return;
     if (noRetry) return;
     setNet('offline', 'Hors ligne');
     retryT = setTimeout(connectWs, Math.min(10000, 1000 * 2 ** retry++));
@@ -94,50 +144,98 @@ function connectWs() {
   sock.onerror = () => {};
 }
 
-function onMsg(m) {
+function onMsg(m, ch) {
+  const isNet = ch.kind === 'net';
   switch (m.t) {
     case 'welcome':
-      if (Array.isArray(m.ice)) ice = m.ice;   // liste vide acceptée : réseau local sans STUN
-      setNet('online', 'En ligne'); break;
+      if (Array.isArray(m.ice)) ch.ice = m.ice;   // liste vide acceptée : réseau local sans STUN
+      if (isNet) setNet('online', 'En ligne');
+      break;
     case 'idtaken':
+      if (!isNet) { if (ch.kind === 'out') failOut(ch, 'Un poste de ce réseau porte déjà votre prénom.'); break; }
       noRetry = true; setNet('offline', 'Prénom déjà utilisé');
       showSetup('Un autre poste en ligne porte déjà le prénom « ' + cfg.prenom + ' ». Ajoutez un repère, par exemple « ' + cfg.prenom + '-Paris ».', 'Prénom déjà utilisé');
       break;
     case 'forbidden':
+      if (!isNet) { if (ch.kind === 'out') failOut(ch, 'Clé de l’agence refusée par ce poste : vérifiez les réglages.'); break; }
       noRetry = true; setNet('offline', 'Clé de l’agence refusée');
       toast('Clé de l’agence incorrecte : vérifiez les réglages.'); $('#settings').open = true;
       break;
     case 'error':
+      if (!isNet) { if (ch.kind === 'out' && m.reason === 'blocked') failOut(ch, REASONS.blocked); break; }
       if (m.reason === 'blocked') { noRetry = true; setNet('offline', 'Trop d’essais, patientez'); retryT = setTimeout(connectWs, 65000); }
       break;
-    case 'peers': renderPeers(m.list); break;
+    case 'peers': if (isNet) { netPeers = Array.isArray(m.list) ? m.list : []; renderPeers(); } break;
     case 'codeused':
-      myCode = genCode(); renderSelf(); wsSend({ t: 'code', code: myCode }); break;
+      myCode = genCode(); renderSelf(); sendCode(); break;
     case 'ringing':
-      $('#callText').textContent = 'En attente de l’acceptation de l’autre poste…'; break;
-    case 'incoming': onIncoming(m); break;
-    case 'reply': onReply(m); break;
-    case 'signal': onSignal(m); break;
+      if (outgoing && outgoing.ch === ch) $('#callText').textContent = 'En attente de l’acceptation de l’autre poste…'; break;
+    case 'incoming': onIncoming(m, ch); break;
+    case 'reply': onReply(m, ch); break;
+    case 'signal': onSignal(m, ch); break;
     case 'bye':
-      if (incoming && incoming.from === m.from) { closeIncoming(); toast('La demande a été annulée.'); }
-      else if (sess && sess.peer === m.from) endSession(false, 'L’autre poste a mis fin à la session.');
+      if (incoming && incoming.from === m.from && incoming.ch === ch) { closeIncoming(); toast('La demande a été annulée.'); }
+      else if (sess && sess.peer === m.from && sess.ch === ch) endSession(false, 'L’autre poste a mis fin à la session.');
       break;
   }
 }
 
 /* ---------- Appel sortant ---------- */
-function onReply(m) {
-  if (!outgoing) return;
+function onReply(m, ch) {
+  if (!outgoing || outgoing.ch !== ch) return;
   const o = outgoing; outgoing = null;
   $('#calling').hidden = true;
-  if (m.ok) startSession({ peer: m.from, name: m.from, mode: o.mode, initiator: true, control: !!m.control });
-  else { const t = REASONS[m.reason] || 'Connexion impossible.'; $('#err').textContent = t; toast(t); }
+  if (m.ok) startSession({ peer: m.from, name: m.from, mode: o.mode, initiator: true, control: !!m.control, ch });
+  else { closeOut(ch); const t = REASONS[m.reason] || 'Connexion impossible.'; $('#err').textContent = t; toast(t); }
+}
+function closeOut(ch, delay = 0) {
+  if (!ch || ch.kind !== 'out' || !ch.ws) return;
+  const w = ch.ws; ch.ws = null;
+  setTimeout(() => { try { w.onclose = null; w.close(); } catch { /* ignoré */ } }, delay);
+}
+function failOut(ch, text) {
+  if (!outgoing || outgoing.ch !== ch) return;
+  outgoing = null; $('#calling').hidden = true; closeOut(ch);
+  $('#err').textContent = text; toast(text);
+}
+// Appel direct : liaison vers le hub du poste appelé (réseau privé), puis appel avec son code.
+function callDirect(route, to, code, mode) {
+  const ch = { kind: 'out', ws: null, ice: [] };
+  outgoing = { to, mode, ch };
+  $('#callText').textContent = 'Appel de ' + to + ' (réseau privé)…';
+  $('#calling').hidden = false;
+  let sock;
+  const unreachable = () => {
+    if (!outgoing || outgoing.ch !== ch) return;
+    if (net.ws && net.ws.readyState === 1) { closeOut(ch); callNet(to, code, mode); }      // repli : serveur Internet
+    else failOut(ch, 'Poste injoignable sur le réseau privé.');
+  };
+  try { sock = ch.ws = new WebSocket('ws://' + (route.host.includes(':') ? '[' + route.host + ']' : route.host) + ':' + route.port); } catch { unreachable(); return; }
+  const timer = setTimeout(() => { if (!ch.welcomed) unreachable(); }, 5000);
+  sock.onopen = () => chSend(ch, { t: 'hello', name: cfg.prenom, code: myCode, key: cfg.key, inst: cfg.inst });
+  sock.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.t === 'welcome') { ch.welcomed = true; clearTimeout(timer); ch.ice = Array.isArray(m.ice) ? m.ice : []; chSend(ch, { t: 'call', to, code, mode }); return; }
+    onMsg(m, ch);
+  };
+  sock.onerror = () => {};
+  sock.onclose = () => {
+    clearTimeout(timer);
+    if (!ch.welcomed) unreachable();
+    else if (outgoing && outgoing.ch === ch) failOut(ch, 'La liaison avec le poste a été interrompue.');
+  };
+}
+function callNet(to, code, mode) {
+  outgoing = { to, mode, ch: net };
+  $('#callText').textContent = 'Appel de ' + to + '…';
+  $('#calling').hidden = false;
+  wsSend({ t: 'call', to, code, mode });
 }
 
 /* ---------- Appel entrant ---------- */
-function onIncoming(m) {
-  if (sess || incoming || outgoing) { wsSend({ t: 'reply', to: m.from, ok: false }); return; }
-  incoming = m;
+function onIncoming(m, ch) {
+  if (sess || incoming || outgoing) { chSend(ch, { t: 'reply', to: m.from, ok: false }); return; }
+  incoming = { ...m, ch };
   $('#inText').textContent = m.mode === 'control'
     ? m.from + ' demande à voir votre écran et à le piloter.'
     : m.from + ' souhaite vous présenter son écran.';
@@ -151,7 +249,7 @@ function closeIncoming() { incoming = null; $('#incoming').hidden = true; }
 async function startSession(o) {
   const sharer = o.initiator ? o.mode === 'present' : o.mode === 'control';
   const s = sess = {
-    peer: o.peer, name: o.name, mode: o.mode, sharer, control: !!o.control,
+    peer: o.peer, name: o.name, mode: o.mode, sharer, control: !!o.control, ch: o.ch,
     canInject: true, pc: null, dc: null, stream: null, cands: [], sec: 0, tickT: null, statT: null,
     sentDown: new Set(), btnDown: new Set(), reqTimer: null,
   };
@@ -170,8 +268,8 @@ async function startSession(o) {
   updateUi();
   s.tickT = setInterval(() => { s.sec++; $('#timer').textContent = String(Math.floor(s.sec / 60)).padStart(2, '0') + ':' + String(s.sec % 60).padStart(2, '0'); }, 1000);
 
-  const pc = s.pc = new RTCPeerConnection({ iceServers: ice });
-  pc.onicecandidate = (e) => { if (e.candidate && sess === s) wsSend({ t: 'signal', to: s.peer, data: { c: e.candidate.toJSON() } }); };
+  const pc = s.pc = new RTCPeerConnection({ iceServers: o.ch.ice });
+  pc.onicecandidate = (e) => { if (e.candidate && sess === s) chSend(s.ch, { t: 'signal', to: s.peer, data: { c: e.candidate.toJSON() } }); };
   pc.onconnectionstatechange = () => {
     if (sess !== s) return;
     if (pc.connectionState === 'connected') { clearInterval(s.statT); s.statT = setInterval(() => readStats(s), 2000); readStats(s); }
@@ -199,7 +297,7 @@ async function startSharing(s) {
   wireDc(s, s.pc.createDataChannel('input', { ordered: true }));
   const offer = await s.pc.createOffer();
   await s.pc.setLocalDescription(offer);
-  wsSend({ t: 'signal', to: s.peer, data: { sdp: s.pc.localDescription.toJSON() } });
+  chSend(s.ch, { t: 'signal', to: s.peer, data: { sdp: s.pc.localDescription.toJSON() } });
   try {
     const sender = s.pc.getSenders().find((x) => x.track && x.track.kind === 'video');
     const p = sender.getParameters();
@@ -209,9 +307,9 @@ async function startSharing(s) {
   } catch { /* réglage facultatif */ }
 }
 
-async function onSignal(m) {
+async function onSignal(m, ch) {
   const s = sess;
-  if (!s || m.from !== s.peer || !m.data) return;
+  if (!s || m.from !== s.peer || ch !== s.ch || !m.data) return;
   const d = m.data;
   try {
     if (d.sdp) {
@@ -220,7 +318,7 @@ async function onSignal(m) {
       if (d.sdp.type === 'offer') {
         const a = await s.pc.createAnswer();
         await s.pc.setLocalDescription(a);
-        wsSend({ t: 'signal', to: s.peer, data: { sdp: s.pc.localDescription.toJSON() } });
+        chSend(s.ch, { t: 'signal', to: s.peer, data: { sdp: s.pc.localDescription.toJSON() } });
       }
     } else if (d.c) {
       if (s.pc.remoteDescription) await s.pc.addIceCandidate(d.c).catch(() => {});
@@ -304,7 +402,8 @@ async function readStats(s) {
 function endSession(notify, msg) {
   const s = sess; if (!s) return;
   sess = null;
-  if (notify) wsSend({ t: 'bye' });
+  if (notify) chSend(s.ch, { t: 'bye' });
+  closeOut(s.ch, 400);                      // laisse partir le « bye » avant de fermer la liaison temporaire
   clearInterval(s.tickT); clearInterval(s.statT);
   try { s.dc && s.dc.close(); } catch { /* ignoré */ }
   try { s.pc && s.pc.close(); } catch { /* ignoré */ }
@@ -392,46 +491,53 @@ $('#connectForm').addEventListener('submit', (e) => {
   const to = cleanName($('#target').value), code = $('#peerCode').value, err = $('#err');
   if (!NAME_RE.test(to)) { err.textContent = 'Saisissez le prénom du poste à joindre.'; return; }
   if (code.length !== 6) { err.textContent = 'Le code compte 6 signes. Demandez-le à la personne au poste distant.'; return; }
-  if (!ws || ws.readyState !== 1) { err.textContent = 'Pas de connexion au serveur.'; return; }
   if (norm(to) === norm(cfg.prenom)) { err.textContent = 'C’est le prénom de ce poste.'; return; }
+  const route = allPeers().find((p) => norm(p.name) === norm(to) && p.via === 'direct');
+  const netUp = !!net.ws && net.ws.readyState === 1;
+  if (!route && !netUp) { err.textContent = cfg.server ? 'Pas de connexion au serveur.' : 'Ce poste n’est pas visible sur le réseau privé. Vérifiez que le VPN est actif des deux côtés.'; return; }
   err.textContent = '';
   const mode = document.querySelector('input[name="mode"]:checked').value;
-  outgoing = { to, mode };
-  $('#callText').textContent = 'Appel de ' + to + '…';
-  $('#calling').hidden = false;
-  wsSend({ t: 'call', to, code, mode });
+  if (route) callDirect(route, to, code, mode); else callNet(to, code, mode);
 });
-$('#callCancel').addEventListener('click', () => { if (outgoing) wsSend({ t: 'bye' }); outgoing = null; $('#calling').hidden = true; });
-$('#inNo').addEventListener('click', () => { if (incoming) wsSend({ t: 'reply', to: incoming.from, ok: false }); closeIncoming(); });
+$('#callCancel').addEventListener('click', () => { if (outgoing) { chSend(outgoing.ch, { t: 'bye' }); closeOut(outgoing.ch, 300); } outgoing = null; $('#calling').hidden = true; });
+$('#inNo').addEventListener('click', () => { if (incoming) chSend(incoming.ch, { t: 'reply', to: incoming.from, ok: false }); closeIncoming(); });
 $('#inYes').addEventListener('click', () => {
   if (!incoming) return;
   const m = incoming, control = m.mode === 'control' && $('#inCtl').checked;
-  wsSend({ t: 'reply', to: m.from, ok: true, control });
+  chSend(m.ch, { t: 'reply', to: m.from, ok: true, control });
   closeIncoming();
-  startSession({ peer: m.from, name: m.from, mode: m.mode, initiator: false, control });
+  startSession({ peer: m.from, name: m.from, mode: m.mode, initiator: false, control, ch: m.ch });
 });
-$('#newCode').addEventListener('click', () => { myCode = genCode(); renderSelf(); wsSend({ t: 'code', code: myCode }); });
+$('#newCode').addEventListener('click', () => { myCode = genCode(); renderSelf(); sendCode(); });
 $('#copyCode').addEventListener('click', () => {
   navigator.clipboard.writeText(myCode).then(() => toast('Code copié.'), () => toast('Copie impossible.'));
 });
 $('#saveSettings').addEventListener('click', async () => {
   const server = $('#setServer').value.trim(), prenom = cleanName($('#setPrenom').value);
-  if (!/^wss?:\/\/.+/.test(server)) { toast('L’adresse doit commencer par ws:// ou wss://'); return; }
+  if (server && !/^wss?:\/\/.+/.test(server)) { toast('L’adresse du serveur doit commencer par ws:// ou wss:// (ou rester vide).'); return; }
   if (!NAME_RE.test(prenom)) { toast('Prénom invalide : lettres, chiffres, espace, tiret ou apostrophe.'); return; }
-  cfg = await api.setConfig({ prenom, server, key: $('#setKey').value });
-  renderSelf(); connectWs(); toast('Réglages enregistrés.');
+  cfg = await api.setConfig({ prenom, server, key: $('#setKey').value, directEnabled: $('#setDirect').checked, directNets: $('#setNets').value, directPeers: $('#setPeers').value });
+  fillSettings(); renderSelf(); connectWs(); connectHub(); toast('Réglages enregistrés.');
 });
+
+function fillSettings() {
+  $('#setPrenom').value = cfg.prenom; $('#setServer').value = cfg.server; $('#setKey').value = cfg.key;
+  $('#setDirect').checked = cfg.directEnabled !== false;
+  $('#setNets').value = cfg.directNets || ''; $('#setPeers').value = cfg.directPeers || '';
+}
 
 /* ---------- Démarrage ---------- */
 (async () => {
   cfg = await api.getConfig();
   myCode = genCode();
   renderSelf();
-  $('#setPrenom').value = cfg.prenom; $('#setServer').value = cfg.server; $('#setKey').value = cfg.key;
+  fillSettings();
   const inj = await api.inputAvailable();
   $('#injectInfo').textContent = inj
     ? 'Contrôle à distance : disponible sur ce poste.' + (api.platform === 'darwin' ? ' Sur Mac, autorisez l’app dans Réglages Système > Confidentialité (Enregistrement de l’écran et Accessibilité).' : '')
     : 'Contrôle à distance : indisponible sur ce poste (module de saisie non chargé). La présentation fonctionne.';
   connectWs();
+  directStatus = null; renderPeers();
+  connectHub();
 })();
 })();

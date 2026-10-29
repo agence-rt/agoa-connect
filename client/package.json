@@ -6,11 +6,14 @@
   "main": "main.js",
   "private": true,
   "scripts": {
-    "start": "electron .",
-    "dist": "electron-builder"
+    "sync-hub": "node -e \"require('fs').copyFileSync('../server/hub.js','hub.js')\"",
+    "start": "npm run sync-hub && electron .",
+    "test": "npm run sync-hub && node test/direct.test.js",
+    "dist": "npm run sync-hub && electron-builder"
   },
   "dependencies": {
-    "@nut-tree-fork/nut-js": "^4.2.0"
+    "@nut-tree-fork/nut-js": "^4.2.0",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -22,6 +25,8 @@
     "files": [
       "main.js",
       "preload.js",
+      "direct.js",
+      "hub.js",
       "renderer/**",
       "build/icon.png",
       "package.json"

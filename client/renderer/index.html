@@ -13,7 +13,7 @@
   <section class="col">
     <header class="top">
       <h1><img class="logo" src="icon.png" alt="" width="28" height="28">CONNECT</h1>
-      <span class="pill" id="netPill" data-s="connecting">Connexion au serveur…</span>
+      <span class="pills"><span class="pill" id="vpnPill" data-s="connecting">Réseau privé…</span><span class="pill" id="netPill" data-s="connecting">Connexion au serveur…</span></span>
     </header>
 
     <div class="box">
@@ -32,10 +32,15 @@
       <summary>Réglages</summary>
       <label for="setPrenom">Prénom de ce poste</label>
       <input id="setPrenom" autocomplete="off" maxlength="30">
-      <label for="setServer">Adresse du serveur</label>
+      <label for="setServer">Serveur Internet (facultatif)</label>
       <input id="setServer" class="mono" autocomplete="off" placeholder="wss://acces.exemple.fr">
       <label for="setKey">Clé de l’agence</label>
       <input id="setKey" type="password" class="mono" autocomplete="off">
+      <label class="chk"><input type="checkbox" id="setDirect"> Réseau privé (VPN) : voir et joindre directement les postes</label>
+      <label for="setNets">Plages du réseau privé</label>
+      <input id="setNets" class="mono" autocomplete="off" placeholder="100.64.0.0/10">
+      <label for="setPeers">Postes à ajouter à la main (adresses, facultatif)</label>
+      <input id="setPeers" class="mono" autocomplete="off" placeholder="10.8.0.5, 10.8.0.6">
       <button class="ghost" id="saveSettings" type="button">Enregistrer et reconnecter</button>
       <p class="hint" id="injectInfo"></p>
     </details>
@@ -59,8 +64,9 @@
     </form>
 
     <div>
-      <h2>Postes en ligne</h2>
-      <p class="hint" style="margin-bottom:6px">Cliquez sur un poste pour remplir son prénom, puis saisissez le code qu’il vous communique.</p>
+      <div class="row" style="justify-content:space-between"><h2>Postes en ligne</h2><button type="button" class="ghost" id="refreshPeers">Actualiser</button></div>
+      <p class="hint" style="margin-bottom:6px">Les postes du réseau privé (VPN) sont visibles directement. Cliquez sur un poste pour remplir son prénom, puis saisissez le code qu’il vous communique.</p>
+      <p class="hint" id="vpnInfo" style="margin-bottom:6px"></p>
       <div id="peerList" class="peerlist"><span class="hint">Aucun autre poste en ligne.</span></div>
     </div>
   </section>

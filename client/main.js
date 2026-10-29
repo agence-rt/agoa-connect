@@ -3,9 +3,11 @@ const { app, BrowserWindow, ipcMain, session, desktopCapturer, screen, globalSho
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { Direct } = require('./direct');
 
-const DEFAULT_SERVER = process.env.CONNECT_SERVER || 'ws://localhost:8080';
-let win = null;
+// Serveur Internet facultatif : vide = le poste fonctionne uniquement sur le réseau privé (VPN).
+const DEFAULT_SERVER = process.env.CONNECT_SERVER || '';
+let win = null, direct = null, cfgCache = null;
 
 /* ---------- Configuration locale ---------- */
 const cfgFile = () => path.join(app.getPath('userData'), 'config.json');
@@ -15,14 +17,19 @@ function loadConfig() {
   try { c = JSON.parse(fs.readFileSync(cfgFile(), 'utf8')); } catch { /* première exécution */ }
   // Le prénom identifie le poste ; il est demandé au premier lancement (ou fourni par CONNECT_PRENOM, par exemple par le launcher).
   if (!NAME_RE.test(c.prenom || '')) c.prenom = NAME_RE.test(process.env.CONNECT_PRENOM || '') ? process.env.CONNECT_PRENOM : '';
-  if (!c.server) c.server = DEFAULT_SERVER;
+  if (typeof c.server !== 'string') c.server = DEFAULT_SERVER;
+  // Réseau privé (VPN) : écoute et découverte des autres postes, sans serveur central.
+  if (typeof c.directEnabled !== 'boolean') c.directEnabled = true;
+  if (!(Number(c.directPort) > 0 && Number(c.directPort) < 65536)) c.directPort = 47800;
+  if (typeof c.directNets !== 'string') c.directNets = '100.64.0.0/10';
+  if (typeof c.directPeers !== 'string') c.directPeers = '';
   if (typeof c.key !== 'string' || !c.key) c.key = process.env.CONNECT_KEY || '';
   if (!/^[\w-]{8,64}$/.test(c.inst || '')) c.inst = crypto.randomUUID();
   delete c.id; delete c.name;
   saveConfig(c);
   return c;
 }
-function saveConfig(c) { fs.mkdirSync(path.dirname(cfgFile()), { recursive: true }); fs.writeFileSync(cfgFile(), JSON.stringify(c, null, 2)); }
+function saveConfig(c) { cfgCache = c; fs.mkdirSync(path.dirname(cfgFile()), { recursive: true }); fs.writeFileSync(cfgFile(), JSON.stringify(c, null, 2)); }
 
 /* ---------- Injection souris / clavier (poste qui partage son écran) ---------- */
 let nut = null;
@@ -108,11 +115,17 @@ ipcMain.handle('config:set', (_e, patch) => {
     const p = patch.prenom.normalize('NFC').trim().replace(/\s+/g, ' ');
     if (NAME_RE.test(p)) c.prenom = p;
   }
-  if (patch && typeof patch.server === 'string' && /^wss?:\/\//.test(patch.server)) c.server = patch.server.trim();
+  if (patch && typeof patch.server === 'string' && (patch.server.trim() === '' || /^wss?:\/\//.test(patch.server.trim()))) c.server = patch.server.trim();
+  if (patch && typeof patch.directEnabled === 'boolean') c.directEnabled = patch.directEnabled;
+  if (patch && typeof patch.directNets === 'string') c.directNets = patch.directNets.trim().slice(0, 300);
+  if (patch && typeof patch.directPeers === 'string') c.directPeers = patch.directPeers.trim().slice(0, 600);
   if (patch && typeof patch.key === 'string') c.key = patch.key.trim().slice(0, 200);
   saveConfig(c);
+  if (direct) direct.scan().catch(() => {});     // applique tout de suite les réglages du réseau privé
   return c;
 });
+ipcMain.handle('direct:info', () => (direct ? direct.info() : null));
+ipcMain.handle('direct:refresh', () => { if (direct) direct.scan().catch(() => {}); return true; });
 ipcMain.handle('input:available', () => !!loadNut());
 ipcMain.handle('input:send', (_e, ev) => {
   if (!ev || typeof ev.k !== 'string') return false;
@@ -135,6 +148,9 @@ function createWindow() {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
 }
 
+// Les adresses locales ne doivent pas être masquées (mDNS) : sur un VPN, le nom « xxx.local » ne se résout pas.
+app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+
 app.whenReady().then(() => {
   // Capture de l'écran principal sans fenêtre de sélection : l'utilisateur a déjà accepté la connexion dans l'application.
   session.defaultSession.setDisplayMediaRequestHandler(async (_req, callback) => {
@@ -146,9 +162,17 @@ app.whenReady().then(() => {
     } catch { callback({}); }
   });
   createWindow();
+  win.webContents.setWebRTCIPHandlingPolicy('default');   // toutes les interfaces, dont celle du VPN
+  // Mode réseau privé : écoute sur le VPN + découverte des postes.
+  direct = new Direct({
+    getCfg: () => cfgCache || loadConfig(),
+    onPeers: (list) => { if (win && !win.isDestroyed()) win.webContents.send('direct:peers', list); },
+    onStatus: (st) => { if (win && !win.isDestroyed()) win.webContents.send('direct:status', st); },
+  });
+  direct.start().catch((e) => console.error('Réseau privé :', e.message));
   // Arrêt d'urgence du contrôle à distance, utilisable même quand l'autre poste tient la souris.
   globalShortcut.register('CommandOrControl+Alt+X', () => { if (win) win.webContents.send('panic'); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on('will-quit', () => { globalShortcut.unregisterAll(); });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); if (direct) direct.stop(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

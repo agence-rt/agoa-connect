@@ -20,6 +20,10 @@ jobs:
         working-directory: server
       - run: npm test
         working-directory: server
+      - name: Tests du mode réseau privé (client)
+        run: |
+          cp server/hub.js client/hub.js
+          NODE_PATH=server/node_modules node client/test/direct.test.js
 
   bout-en-bout:
     name: Test de bout en bout (Chromium, WebRTC)

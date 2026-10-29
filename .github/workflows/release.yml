@@ -20,6 +20,8 @@ jobs:
           cache-dependency-path: client/package-lock.json
       - run: npm ci
         working-directory: client
+      - run: npm run sync-hub
+        working-directory: client
       - run: npx electron-builder --win --publish never
         working-directory: client
       - uses: softprops/action-gh-release@v2

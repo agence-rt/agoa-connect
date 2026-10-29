@@ -17,13 +17,18 @@ PORT = 8000 + int(time.time()) % 900
 KEY = 'cle-agence-test'
 STUB = """
 window.__inputs = []; window.__resets = 0; window.__panic = null;
-const __cfg = { prenom: '%PRENOM%', server: 'ws://127.0.0.1:%PORT%', key: '%KEY%', inst: '%INST%' };
+const __cfg = { prenom: '%PRENOM%', server: '%SERVER%', key: '%KEY%', inst: '%INST%', directEnabled: true, directNets: '100.64.0.0/10', directPeers: '' };
+window.__directInfo = %DIRECT%;
 window.api = {
   getConfig: async () => ({ ...__cfg }),
   setConfig: async (p) => { Object.assign(__cfg, p); return { ...__cfg }; },
   inputAvailable: async () => true,
   input: async (ev) => { window.__inputs.push(ev); return true; },
   inputReset: async () => { window.__resets++; return true; },
+  directInfo: async () => window.__directInfo,
+  directRefresh: async () => true,
+  onDirectPeers: (cb) => { window.__peersCb = cb; },
+  onDirectStatus: (cb) => { window.__statusCb = cb; },
   onPanic: (cb) => { window.__panic = cb; },
   platform: 'linux',
 };
@@ -35,9 +40,11 @@ navigator.mediaDevices.getDisplayMedia = async () => {
 };
 """
 
-def stub(prenom, inst, key=KEY):
-    return (STUB.replace('%PRENOM%', prenom).replace('%PORT%', str(PORT)).replace('%KEY%', key)
-            .replace('%INST%', inst).replace('%%', '%'))
+def stub(prenom, inst, key=KEY, server=None, direct_port=None):
+    server = 'ws://127.0.0.1:%d' % PORT if server is None else server
+    direct = 'null' if direct_port is None else '{ port: %d, url: "ws://127.0.0.1:%d" }' % (direct_port, direct_port)
+    return (STUB.replace('%PRENOM%', prenom).replace('%SERVER%', server).replace('%KEY%', key)
+            .replace('%INST%', inst).replace('%DIRECT%', direct).replace('%%', '%'))
 
 def check(label, cond):
     print(('  ✓ ' if cond else '  ✗ ') + label)
@@ -69,10 +76,10 @@ time.sleep(0.7)
 try:
     with sync_playwright() as p:
         br = p.chromium.launch(args=['--disable-features=WebRtcHideLocalIpsWithMdns', '--autoplay-policy=no-user-gesture-required'])
-        def new_page(prenom, inst, key=KEY):
+        def new_page(prenom, inst, key=KEY, server=None, direct_port=None):
             pg = br.new_context(viewport={'width': 1100, 'height': 760}).new_page()
             pg.on('pageerror', lambda e: print('  [erreur page %s]' % prenom, e))
-            pg.add_init_script(stub(prenom, inst, key))
+            pg.add_init_script(stub(prenom, inst, key, server, direct_port))
             pg.goto(PAGE)
             return pg
         A = new_page('Anna', 'instance-anna-0001')
@@ -188,6 +195,56 @@ try:
         E.fill('#setupKey', KEY); E.click('#setupForm button[type=submit]')
         E.wait_for_selector('#netPill[data-s=online]', timeout=5000)
         check('prénom et clé saisis au premier lancement : le poste est en ligne (%s)' % E.inner_text('#myId'), E.inner_text('#myId') == 'Camille')
+
+        print('Scénario 5 : réseau privé (VPN), sans aucun serveur Internet')
+        pa, pb = PORT + 100, PORT + 101
+        hubs = [subprocess.Popen(['node', os.path.join(ROOT, 'test', 'hub-run.js'), str(p), KEY], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for p in (pa, pb)]
+        try:
+            time.sleep(0.7)
+            G = new_page('Dieu', 'instance-dieu-0001', server='', direct_port=pa)
+            H = new_page('Hélène', 'instance-helene-001', server='', direct_port=pb)
+            check('sans serveur Internet, le poste l’indique et reste utilisable', 'non configuré' in G.inner_text('#netPill'))
+            for pg, port in ((G, pa), (H, pb)):
+                pg.evaluate('(p) => window.__statusCb({ enabled: true, port: p, listening: ["100.88.0.%d"], vpn: true, tailscale: true, error: "" })' % (1 if port == pa else 2), port)
+            G.wait_for_selector('#vpnPill[data-s=online]', timeout=5000)
+            check('le VPN est détecté : le poste annonce son écoute (%s)' % G.inner_text('#vpnInfo'), '100.88.0.1' in G.inner_text('#vpnInfo'))
+            time.sleep(0.8)   # les postes se déclarent à leur hub
+            for pg, who, port in ((G, 'Hélène', pb), (H, 'Dieu', pa)):
+                pg.evaluate('(a) => window.__peersCb([{ name: a[0], host: "127.0.0.1", port: a[1], busy: false }])', [who, port])
+            G.wait_for_function("() => document.querySelector('#peerList').textContent.includes('Hélène')", timeout=5000)
+            check('Dieu voit directement le poste d’Hélène, marqué « réseau privé »', 'réseau privé' in G.inner_text('#peerList'))
+            code = H.inner_text('#myCode')
+            G.fill('#target', 'helene'); G.fill('#peerCode', 'WRONG1')
+            G.click('label.mode:has(input[value=control])'); G.click('#goBtn')
+            G.wait_for_function("() => document.querySelector('#err').textContent.includes('incorrect')", timeout=5000)
+            check('mauvais code : refusé en direct', True)
+            G.fill('#peerCode', code); G.click('#goBtn')
+            H.wait_for_selector('#incoming', state='visible', timeout=5000)
+            check('Hélène reçoit la demande sans serveur central', 'Dieu' in H.inner_text('#inText'))
+            H.check('#inCtl'); H.click('#inYes')
+            G.wait_for_selector('#session', state='visible', timeout=8000)
+            video_flowing(G)
+            chip_is(G, 'Vous contrôlez')
+            check('Dieu voit l’écran d’Hélène et la contrôle, en direct sur le réseau privé', H.inner_text('#roleChip') == 'Contrôlé à distance')
+            check('le code d’Hélène a été renouvelé après usage', H.inner_text('#myCode') != code)
+            box = G.locator('#viewer').bounding_box()
+            G.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2); G.mouse.down(); G.mouse.up()
+            time.sleep(0.7)
+            check('les commandes arrivent chez Hélène', any(e['k'] == 'md' for e in H.evaluate('window.__inputs')))
+            G.click('#btnEnd')
+            H.wait_for_selector('#home', state='visible', timeout=5000)
+            check('fin de session propagée par la liaison directe', True)
+            # poste annoncé mais injoignable, sans serveur de repli
+            G.evaluate('() => window.__peersCb([{ name: "Fantôme", host: "127.0.0.1", port: 9, busy: false }])')
+            G.fill('#target', 'Fantôme'); G.fill('#peerCode', 'ABCDEF'); G.click('label.mode:has(input[value=present])'); G.click('#goBtn')
+            G.wait_for_function("() => document.querySelector('#err').textContent.includes('injoignable')", timeout=8000)
+            check('poste injoignable : message clair, pas de blocage', G.is_visible('#home') and G.locator('#calling').is_hidden())
+            # VPN absent
+            H.evaluate('() => window.__statusCb({ enabled: true, port: %d, listening: [], vpn: false, tailscale: false, error: "" })' % pb)
+            H.wait_for_selector('#vpnPill[data-s=offline]', timeout=3000)
+            check('VPN absent : l’interface le dit et explique quoi faire', 'Tailscale' in H.inner_text('#vpnInfo'))
+        finally:
+            for h in hubs: h.terminate()
         br.close()
     print('\nTest de bout en bout : tout passe.')
 finally:
